@@ -1,0 +1,23 @@
+name: Validate
+on:
+  push:
+  pull_request:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Agent syntax
+        run: node --check agent/src/index.js
+      - name: API syntax
+        run: node --check api/src/server.js
+      - name: PHP syntax
+        run: |
+          find frontend -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: SQL sanity
+        run: |
+          test -s database/schema.sql
+          find database/migrations -type f -name '*.sql' -print0 | xargs -0 -n1 sh -c 'test -s "$0"'
