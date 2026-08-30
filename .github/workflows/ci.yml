@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+      - name: Agent install
+        working-directory: agent
+        run: npm ci --ignore-scripts
+      - name: Agent syntax
+        working-directory: agent
+        run: node --check src/agent.js
+      - name: API install
+        working-directory: api
+        run: npm ci --ignore-scripts
+      - name: API syntax
+        working-directory: api
+        run: node --check src/index.js
+      - name: PHP syntax
+        run: |
+          find frontend -name '*.php' -print0 | xargs -0 -n1 php -l
