@@ -33,6 +33,24 @@ services:
     ports:
       - "3000:3000"
 
+  worker:
+    build: ./api
+    restart: unless-stopped
+    command: ["npm","run","worker"]
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${DB_NAME:-monitoring}
+      DB_USER: ${DB_USER:-monitor}
+      DB_PASSWORD: ${DB_PASSWORD:-change-me}
+      AGENT_STALE_SEC: ${AGENT_STALE_SEC:-180}
+      METRIC_RETENTION_DAYS: ${METRIC_RETENTION_DAYS:-30}
+      CHECK_RETENTION_DAYS: ${CHECK_RETENTION_DAYS:-30}
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-180}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
   frontend:
     image: php:8.3-apache
     restart: unless-stopped
