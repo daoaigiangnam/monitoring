@@ -1,37 +1,46 @@
 import os from 'node:os';
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import https from 'node:https';
+import dns from 'node:dns/promises';
 import si from 'systeminformation';
+import axios from 'axios';
 
-const execFileAsync = promisify(execFile);
-const API_URL = process.env.API_URL || 'http://127.0.0.1:8080';
-const AGENT_ID = process.env.AGENT_ID || `${os.hostname()}-${Math.random().toString(36).slice(2, 8)}`;
-const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
-const INTERVAL = Number(process.env.INTERVAL_SECONDS || 60) * 1000;
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-const QUEUE_FILE = path.join(DATA_DIR, 'queue.jsonl');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const cfg = {
+  apiUrl: process.env.API_URL || 'http://localhost:3000',
+  agentId: process.env.AGENT_ID || os.hostname(),
+  token: process.env.AGENT_TOKEN || '',
+  intervalMs: Number(process.env.INTERVAL_MS || 60000),
+  queueDir: process.env.QUEUE_DIR || path.resolve('data/queue')
+};
 
-async function cpu() { const x = await si.currentLoad(); return { key: 'system.cpu.util', value: Number(x.currentLoad.toFixed(2)) }; }
-async function memory() { const x = await si.mem(); return { key: 'memory.util', value: Number(((x.used / x.total) * 100).toFixed(2)), labels: { total: x.total, used: x.used, free: x.available } }; }
-async function disks() { const fsInfo = await si.fsSize(); return fsInfo.map(d => ({ key: 'disk.used.util', value: Number(d.use.toFixed(2)), labels: { mount: d.mount, total: d.size, used: d.used, available: d.size - d.used } })); }
-async function network() { const stats = await si.networkStats(); return stats.map(n => ({ key: 'network.bytes', value: Number(n.rx_bytes + n.tx_bytes), labels: { iface: n.iface, rx_bytes: n.rx_bytes, tx_bytes: n.tx_bytes } })); }
-async function systemInfo() { const [osInfo, nets, time] = await Promise.all([si.osInfo(), si.networkInterfaces(), si.time()]); const lan = nets.filter(n => n.ip4 && !n.internal).map(n => n.ip4); return [
-  { key: 'system.uptime.seconds', value: os.uptime() },
-  { key: 'system.info', value: 1, labels: { hostname: os.hostname(), platform: osInfo.platform, distro: osInfo.distro, release: osInfo.release, arch: os.arch(), timezone: time.timezoneName, lan_ip: lan } }
-]; }
-async function windowsServices() { if (process.platform !== 'win32') return []; try { const { stdout } = await execFileAsync('sc', ['query', 'type=', 'service', 'state=', 'all'], { windowsHide: true }); const lines = stdout.split(/\r?\n/); const out = []; let name = ''; for (const line of lines) { if (line.includes('SERVICE_NAME:')) name = line.split(':').slice(1).join(':').trim(); if (line.includes('STATE')) { const state = line.includes('RUNNING') ? 'running' : 'stopped'; if (name) out.push({ key: 'windows.service.state', value: state === 'running' ? 1 : 0, labels: { service: name, state } }); } } return out; } catch { return []; } }
-function portCheck(host, port, timeout = 3000) { return new Promise(resolve => { const start = Date.now(); const socket = net.createConnection({ host, port }); let done = false; const finish = (ok, error = null) => { if (done) return; done = true; socket.destroy(); resolve({ key: 'check.tcp', value: ok ? 1 : 0, labels: { host, port, response_ms: Date.now() - start, error } }); }; socket.setTimeout(timeout); socket.once('connect', () => finish(true)); socket.once('timeout', () => finish(false, 'timeout')); socket.once('error', e => finish(false, e.code || 'error')); }); }
-async function collect() { return [await cpu(), await memory(), ...(await disks()), ...(await network()), ...(await systemInfo()), ...(await windowsServices())]; }
-async function send(payload) { const body = JSON.stringify(payload); const res = await fetch(`${API_URL}/api/v1/agent/metrics`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-agent-id': AGENT_ID, authorization: `Bearer ${AGENT_TOKEN}` }, body }); if (!res.ok) throw new Error(`HTTP ${res.status}`); }
-function queue(payload) { fs.appendFileSync(QUEUE_FILE, JSON.stringify(payload) + '\n', 'utf8'); }
-async function flushQueue() { if (!fs.existsSync(QUEUE_FILE)) return; const lines = fs.readFileSync(QUEUE_FILE, 'utf8').split('\n').filter(Boolean); const remain = []; for (const line of lines.slice(-5000)) { try { await send(JSON.parse(line)); } catch { remain.push(line); } } if (remain.length) fs.writeFileSync(QUEUE_FILE, remain.join('\n') + '\n'); else fs.rmSync(QUEUE_FILE, { force: true }); }
-
-async function tick() { const metrics = await collect(); const payload = { agent_id: AGENT_ID, timestamp: Math.floor(Date.now() / 1000), metrics }; try { await flushQueue(); await send(payload); } catch (e) { queue(payload); console.error('send failed:', e.message); } }
-
-console.log(`Monitoring agent ${AGENT_ID} started`);
-await tick();
-setInterval(() => tick().catch(e => console.error(e)), INTERVAL);
+async function jsonFile(file, fallback) { try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fallback; } }
+async function localConfig() { return jsonFile(path.resolve(process.env.AGENT_CONFIG || 'config.json'), {}); }
+async function collect() {
+  const [load, mem, fsys, disk, netStats, osInfo, netIf, time, procs, services] = await Promise.all([
+    si.currentLoad(), si.mem(), si.fsSize(), si.disksIO(), si.networkStats(), si.osInfo(), si.networkInterfaces(), si.time(), si.processes(), si.services('*')
+  ]);
+  return {
+    agent_id: cfg.agentId, timestamp: new Date().toISOString(),
+    system: { hostname: os.hostname(), platform: os.platform(), arch: os.arch(), uptime: os.uptime(), load: os.loadavg(), cpu_percent: load.currentLoad, cpu_cores: os.cpus().length, memory_total: mem.total, memory_used: mem.active, memory_free: mem.available, swap_total: mem.swaptotal, swap_used: mem.swapused, boot: new Date(Date.now() - os.uptime()*1000).toISOString(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, os: osInfo.distro, os_release: osInfo.release, kernel: osInfo.kernel, ip_lan: netIf.filter(x=>x.ip4 && !x.internal).map(x=>x.ip4), macs: netIf.filter(x=>x.mac && x.mac !== '00:00:00:00:00:00').map(x=>x.mac) },
+    disks: fsys.map(x=>({mount:x.mount,size:x.size,used:x.used,use_percent:x.use,available:x.available,fs:x.fs,type:x.type})),
+    disk_io: disk, network: netStats.map(x=>({iface:x.iface,rx_bytes:x.rx_bytes,tx_bytes:x.tx_bytes,rx_sec:x.rx_sec,tx_sec:x.tx_sec,rx_errors:x.rx_errors,tx_errors:x.tx_errors,rx_dropped:x.rx_dropped,tx_dropped:x.tx_dropped,operstate:x.operstate})),
+    processes: procs.list.slice(0, 200).map(x=>({pid:x.pid,name:x.name,cpu:x.cpu,mem:x.mem,state:x.state,threads:x.threads})),
+    services: services.map(x=>({name:x.name,status:x.running?'RUNNING':'STOPPED',cpu:x.cpu,mem:x.mem})),
+    metrics: [{key:'system.cpu.util',value:Number(load.currentLoad.toFixed(2))},{key:'memory.util',value:Number((mem.active/mem.total*100).toFixed(2))},{key:'memory.available',value:mem.available},{key:'system.uptime',value:os.uptime}]
+  };
+}
+function tcpCheck(host, port, timeout=5000) { return new Promise(resolve=>{ const s=net.createConnection({host,port}); const t=setTimeout(()=>{s.destroy();resolve({ok:false,ms:timeout});},timeout); const start=Date.now(); s.once('connect',()=>{clearTimeout(t);s.end();resolve({ok:true,ms:Date.now()-start});}); s.once('error',()=>{clearTimeout(t);resolve({ok:false,ms:Date.now()-start});}); }); }
+async function checks(config) {
+  const out=[];
+  for (const c of (config.tcp || [])) out.push({type:'tcp',target:`${c.host}:${c.port}`,...(await tcpCheck(c.host,c.port,c.timeout))});
+  for (const c of (config.http || [])) { const start=Date.now(); try { const r=await axios.get(c.url,{timeout:c.timeout||10000,validateStatus:()=>true}); out.push({type:'http',target:c.url,ok:r.status>=200&&r.status<400,status:r.status,ms:Date.now()-start}); } catch(e){ out.push({type:'http',target:c.url,ok:false,status:0,ms:Date.now()-start,error:e.code||e.message}); } }
+  for (const c of (config.dns || [])) { const start=Date.now(); try { const a=await dns.resolve(c.name,c.record||'A'); out.push({type:'dns',target:c.name,ok:true,ms:Date.now()-start,answers:a}); } catch(e){out.push({type:'dns',target:c.name,ok:false,ms:Date.now()-start,error:e.code||e.message});} }
+  return out;
+}
+async function enqueue(payload) { await fs.mkdir(cfg.queueDir,{recursive:true}); const f=path.join(cfg.queueDir,`${Date.now()}-${Math.random().toString(16).slice(2)}.json`); await fs.writeFile(f,JSON.stringify(payload)); }
+async function send(payload) { try { await axios.post(`${cfg.apiUrl}/api/v1/agent/report`,payload,{timeout:15000,headers:{Authorization:`Bearer ${cfg.token}`,'content-type':'application/json'}}); return true; } catch { await enqueue(payload); return false; } }
+async function flush() { try { const files=(await fs.readdir(cfg.queueDir)).filter(x=>x.endsWith('.json')).sort(); for(const f of files){ const p=path.join(cfg.queueDir,f); try{const body=JSON.parse(await fs.readFile(p,'utf8')); await axios.post(`${cfg.apiUrl}/api/v1/agent/report`,body,{timeout:15000,headers:{Authorization:`Bearer ${cfg.token}`}}); await fs.unlink(p);}catch{break;} } } catch {} }
+async function main(){ const config=await localConfig(); await flush(); const payload=await collect(); payload.checks=await checks(config); await send(payload); }
+main(); setInterval(main,cfg.intervalMs); setInterval(flush,Math.min(cfg.intervalMs,30000));

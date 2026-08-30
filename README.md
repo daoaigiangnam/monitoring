@@ -1,32 +1,32 @@
 # Infrastructure Monitoring
 
-Mini-Zabbix-style infrastructure monitoring platform.
+A production-oriented Mini-Zabbix-style infrastructure monitoring platform.
 
-## Stack
-- Agent: Node.js (Windows/Linux capable)
-- Backend API: Node.js + Fastify
-- Database: MySQL 8
-- Frontend/Admin: PHP 8+ (plain PHP), Bootstrap 5, Chart.js
-- Notifications: Telegram / Email / Webhook
-- Deployment: Docker Compose
+## Final architecture
+- **Agent:** Node.js 20+, Windows/Linux collectors and active checks
+- **Backend API:** Node.js + Fastify
+- **Database:** MySQL 8
+- **Frontend/Admin:** Plain PHP 8.2+, Bootstrap 5, Chart.js
+- **Notifications:** Telegram / SMTP email / Webhook
+- **Deployment:** Docker Compose
 
-## Repository layout
-- `agent/` monitoring agent
-- `api/` Node.js API and alert engine
-- `frontend/` plain-PHP dashboard and admin
-- `database/` MySQL schema and seed data
-- `docs/` architecture, API and deployment docs
-- `docker-compose.yml` local/dev deployment
-
-## Monitored areas
-CPU, RAM, disk usage/I/O, network I/O, OS, hostname, LAN IPs, uptime, processes, Windows/Linux services, ping, TCP ports, HTTP/HTTPS URLs, DNS, SSL certificate expiry, discovery, heartbeat, offline buffering and alerts.
+## Monitoring scope
+CPU, memory, swap/pagefile, filesystem capacity and inode, disk I/O, network I/O/errors, OS/hostname/IP/MAC/uptime, processes, Windows services, Linux systemd, ping, TCP, HTTP/HTTPS, DNS, TLS expiry, discovery, heartbeat, offline queue, trigger evaluation, deduplication, recovery, acknowledgement, maintenance, dependencies and audit logging.
 
 ## Quick start
-1. Copy `.env.example` to `.env` and set secrets.
-2. Run `docker compose up -d`.
-3. Import `database/schema.sql` (automatically mounted by MySQL on first initialization).
-4. Open PHP frontend and log in with the seeded admin account shown in `.env.example`; change it immediately.
-5. Build/run the agent from `agent/` and enroll it with the API token generated in Admin.
+1. Copy `.env.example` to `.env` and set strong secrets.
+2. `docker compose up -d --build`
+3. Open the PHP frontend on port 8080.
+4. Create/enroll an agent with the API enrollment endpoint.
+5. Configure checks and thresholds in Admin.
+
+## Agent
+`cd agent && npm install && npm start`
+
+Set `API_URL`, `AGENT_ID`, and `AGENT_TOKEN` in the environment or `agent/config.json`.
 
 ## Security
-Use HTTPS in production. Never commit `.env` or real API secrets. Agents send outbound HTTPS only and support signed authenticated requests.
+Use HTTPS in production, rotate agent tokens, restrict API exposure, never commit `.env`, and run the agent with the least privilege required by the collectors you enable.
+
+## Production notes
+Metrics are retained by policy. Raw metrics should be aggregated before long-term retention. Run the API worker/cron jobs continuously in production. The included Docker setup is a development/single-node baseline, not a high-availability topology.
