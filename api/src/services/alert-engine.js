@@ -2,6 +2,18 @@ import crypto from 'node:crypto';
 const fingerprint=(hostId,ruleId,key)=>crypto.createHash('sha256').update(`${hostId}:${ruleId}:${key}`).digest('hex');
 function matches(v,op,t){if(!Number.isFinite(v)||t===null)return false;return op==='>'?v>t:op==='>='?v>=t:op==='<'?v<t:op==='<='?v<=t:op==='='?v===t:v!==t;}
 
+// Problems remain recorded, while notifications can be suppressed by maintenance
+// windows or an upstream dependency that is already in a problem state.
+async function isSuppressed(db,hostId){
+ const [[m]]=await db.execute('SELECT COUNT(*) n FROM maintenance_windows WHERE enabled=1 AND (host_id IS NULL OR host_id=?) AND NOW() BETWEEN starts_at AND ends_at',[hostId]);
+ if(Number(m?.n||0)>0)return true;
+ const [[d]]=await db.execute(`SELECT COUNT(*) n FROM dependencies d JOIN hosts p ON p.id=d.parent_host_id JOIN alerts a ON a.host_id=p.id AND a.status IN ('OPEN','ACKNOWLEDGED') WHERE d.child_host_id=? AND d.enabled=1`,[hostId]);
+ return Number(d?.n||0)>0;
+}
+async function queueNotifications(db,alertId,eventType,hostId){
+ if(await isSuppressed(db,hostId))return;
+ await db.execute('INSERT INTO alert_notifications(alert_id,channel_id,event_type) SELECT ?,id,? FROM notification_channels WHERE enabled=1',[alertId,eventType]);
+}
 export async function evaluateAlerts(db,hostId,metrics){
  const [rules]=await db.execute('SELECT * FROM alert_rules WHERE enabled=1'); const now=new Date();
  for(const m of metrics){const value=Number(m.value);if(!Number.isFinite(value))continue;
@@ -15,19 +27,18 @@ export async function evaluateAlerts(db,hostId,metrics){
    if(now-firstBad < Number(r.duration_sec||0)*1000)continue;
    const fp=fingerprint(hostId,r.id,r.metric_key); const [open]=await db.execute('SELECT id FROM alerts WHERE fingerprint=? AND status IN ("OPEN","ACKNOWLEDGED") LIMIT 1',[fp]);
    if(open.length)continue;
-   const [ins]=await db.execute('INSERT INTO alerts(host_id,rule_id,fingerprint,severity,status,title,message,started_at) VALUES(?,?,?,?,"OPEN",?,?,?)',[hostId,r.id,fp,r.severity,r.name,`${r.metric_key} ${r.operator} ${r.threshold}; current=${value}`,firstBad]);
+   const [ins]=await db.execute('INSERT INTO alerts(host_id,rule_id,fingerprint,severity,status,title,message,started_at) VALUES(?,?,?, ?,"OPEN",?,?,?)',[hostId,r.id,fp,r.severity,r.name,`${r.metric_key} ${r.operator} ${r.threshold}; current=${value}`,firstBad]);
    await db.execute('INSERT INTO alert_events(alert_id,event_type,message) VALUES(?,?,?)',[ins.insertId,'OPEN',`Triggered after ${Math.round((now-firstBad)/1000)}s: ${r.metric_key}=${value}`]);
-   await db.execute('INSERT INTO alert_notifications(alert_id,channel_id,event_type) SELECT ?,id,"ALERT" FROM notification_channels WHERE enabled=1',[ins.insertId]);
+   await queueNotifications(db,ins.insertId,'ALERT',hostId);
   }
  }
 }
-
 export async function resolveRecovered(db,hostId,metrics){
  const [alerts]=await db.execute('SELECT a.id,a.rule_id,r.metric_key,r.operator,r.threshold FROM alerts a JOIN alert_rules r ON r.id=a.rule_id WHERE a.host_id=? AND a.status IN ("OPEN","ACKNOWLEDGED")',[hostId]);
  for(const a of alerts){const m=metrics.find(x=>x.key===a.metric_key);if(!m)continue;if(!matches(Number(m.value),a.operator,Number(a.threshold))){
    await db.execute('UPDATE alerts SET status="RESOLVED",resolved_at=NOW() WHERE id=?',[a.id]);
    await db.execute('INSERT INTO alert_events(alert_id,event_type,message) VALUES(?,?,?)',[a.id,'RESOLVED',`Recovered: ${a.metric_key}=${m.value}`]);
    await db.execute('DELETE FROM alert_rule_states WHERE host_id=? AND rule_id=?',[hostId,a.rule_id]);
-   await db.execute('INSERT INTO alert_notifications(alert_id,channel_id,event_type) SELECT ?,id,"RECOVERY" FROM notification_channels WHERE enabled=1',[a.id]);
+   await queueNotifications(db,a.id,'RECOVERY',hostId);
   }}
 }
