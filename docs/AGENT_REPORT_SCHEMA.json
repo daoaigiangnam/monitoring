@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Monitoring Agent Report",
+  "type": "object",
+  "required": ["agent_id", "hostname", "timestamp", "metrics"],
+  "properties": {
+    "agent_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "hostname": {"type": "string", "minLength": 1, "maxLength": 255},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "agent_version": {"type": "string", "maxLength": 64},
+    "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}}
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 255},
+        "value": {"type": ["number", "string", "boolean", "null"]},
+        "unit": {"type": "string", "maxLength": 32},
+        "labels": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 255}}
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "required": ["type", "target", "status"],
+      "properties": {
+        "type": {"enum": ["ping", "tcp", "http", "https", "dns", "ssl", "service"]},
+        "target": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "status": {"enum": ["UP", "DOWN", "UNKNOWN"]},
+        "latency_ms": {"type": ["number", "null"], "minimum": 0},
+        "message": {"type": "string", "maxLength": 2048}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
