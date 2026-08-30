@@ -1,9 +1,9 @@
 {
   "name": "infra-monitor-api",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "engines": {"node": ">=20"},
-  "scripts": {"start": "node src/server.js", "dev": "node --watch src/server.js"},
+  "scripts": {"start": "node src/server.js", "dev": "node --watch src/server.js", "worker": "node src/workers/maintenance-worker.js"},
   "dependencies": {"fastify": "^5.4.0", "mysql2": "^3.14.0", "pino": "^9.7.0"}
 }
