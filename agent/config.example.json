@@ -1,7 +1,20 @@
 {
-  "tcp": [
-    {"host":"127.0.0.1","port":3306,"timeout":3000}
+  "discovery": true,
+  "ping": [
+    { "host": "8.8.8.8", "timeout": 3000 },
+    { "host": "192.168.1.1", "timeout": 2000 }
   ],
-  "http": [],
-  "dns": []
+  "tcp": [
+    { "host": "127.0.0.1", "port": 443, "timeout": 3000 },
+    { "host": "127.0.0.1", "port": 1433, "timeout": 3000 }
+  ],
+  "http": [
+    { "url": "https://example.com", "timeout": 8000, "expectedStatus": [200, 204] }
+  ],
+  "dns": [
+    { "name": "example.com", "record": "A", "timeout": 3000 }
+  ],
+  "ssl": [
+    { "host": "example.com", "port": 443, "timeout": 5000 }
+  ]
 }
