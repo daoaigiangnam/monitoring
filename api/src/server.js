@@ -19,7 +19,7 @@ async function agentAuth(req, reply) {
 
 app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }));
 
-app.post('/api/v1/agent/report', { preHandler: agentAuth }, async (req, reply) => {
+app.post('/api/v1/agent/report', { preHandler: agentAuth }, async (req) => {
   const b = req.body || {}; const a = req.agent; const now = new Date(b.timestamp || Date.now());
   await db.execute('UPDATE agents SET hostname=?,ip_address=?,os_name=?,os_release=?,agent_version=?,last_seen=NOW() WHERE id=?', [b.system?.hostname || null, b.system?.ip_lan?.[0] || null, b.system?.os || null, b.system?.os_release || null, b.agent_version || null, a.id]);
   const [h] = await db.execute('SELECT id FROM hosts WHERE agent_id=? LIMIT 1', [a.id]);
@@ -55,10 +55,23 @@ app.get('/api/v1/dashboard/summary', async () => {
   return { hosts: h, alerts: a };
 });
 app.get('/api/v1/hosts', async () => { const [r] = await db.query('SELECT h.*,a.agent_id,a.last_seen agent_last_seen FROM hosts h LEFT JOIN agents a ON a.id=h.agent_id ORDER BY h.name'); return r; });
-app.get('/api/v1/hosts/:id/metrics', async req => { const [r] = await db.execute('SELECT metric_key,metric_value,recorded_at FROM metrics WHERE host_id=? ORDER BY recorded_at DESC LIMIT 1000', [req.params.id]); return r; });
+app.get('/api/v1/hosts/:id', async req => { const [[h]] = await db.execute('SELECT h.*,a.agent_id,a.agent_version,a.os_name,a.os_release,a.ip_address agent_ip,a.last_seen agent_last_seen FROM hosts h LEFT JOIN agents a ON a.id=h.agent_id WHERE h.id=? LIMIT 1',[req.params.id]); if(!h)return {error:'not_found'}; const [items]=await db.execute('SELECT id,item_key,item_type,enabled,interval_sec,config FROM monitor_items WHERE host_id=? ORDER BY id',[req.params.id]); const [alerts]=await db.execute('SELECT * FROM alerts WHERE host_id=? ORDER BY created_at DESC LIMIT 100',[req.params.id]); return {host:h,items,alerts}; });
+app.get('/api/v1/hosts/:id/metrics', async req => { const limit=Math.min(5000,Math.max(1,Number(req.query?.limit||1000))); const [r] = await db.execute(`SELECT metric_key,metric_value,recorded_at FROM metrics WHERE host_id=? ORDER BY recorded_at DESC LIMIT ${limit}`, [req.params.id]); return r; });
 app.get('/api/v1/hosts/:id/checks', async req => { const [r] = await db.execute('SELECT check_type,target,ok,response_ms,status_code,error_message,checked_at FROM check_results WHERE host_id=? ORDER BY checked_at DESC LIMIT 500', [req.params.id]); return r; });
 app.get('/api/v1/alerts', async () => { const [r] = await db.query('SELECT al.*,h.name host_name FROM alerts al JOIN hosts h ON h.id=al.host_id ORDER BY al.created_at DESC LIMIT 500'); return r; });
 app.post('/api/v1/alerts/:id/ack', async req => { await db.execute('UPDATE alerts SET status="ACKNOWLEDGED",acknowledged_at=NOW() WHERE id=? AND status="OPEN"', [req.params.id]); await db.execute('INSERT INTO alert_events(alert_id,event_type,message) VALUES(?,?,?)', [req.params.id, 'ACKNOWLEDGED', 'Acknowledged by operator']); return { success: true }; });
 app.get('/api/v1/agents', async () => { const [r] = await db.query('SELECT id,agent_id,enabled,hostname,ip_address,os_name,os_release,agent_version,last_seen,created_at FROM agents ORDER BY agent_id'); return r; });
+
+app.post('/api/v1/hosts/:id/items', async req => {
+  const b=req.body||{}; const type=String(b.item_type||'metric').toLowerCase(); const key=String(b.item_key||'').trim();
+  if(!key)return {error:'item_key_required'};
+  const interval=Math.min(86400,Math.max(5,Number(b.interval_sec||60)));
+  const config=JSON.stringify(b.config||{});
+  const [r]=await db.execute('INSERT INTO monitor_items(host_id,item_key,item_type,enabled,interval_sec,config) VALUES(?,?,?,?,?,?)',[req.params.id,key,type,b.enabled===false?0:1,interval,config]);
+  return {success:true,id:r.insertId};
+});
+app.put('/api/v1/items/:id', async req => { const b=req.body||{}; await db.execute('UPDATE monitor_items SET item_key=?,item_type=?,enabled=?,interval_sec=?,config=? WHERE id=?',[String(b.item_key||'').trim(),String(b.item_type||'metric').toLowerCase(),b.enabled===false?0:1,Math.min(86400,Math.max(5,Number(b.interval_sec||60))),JSON.stringify(b.config||{}),req.params.id]); return {success:true}; });
+app.delete('/api/v1/items/:id', async req => { await db.execute('DELETE FROM monitor_items WHERE id=?',[req.params.id]); return {success:true}; });
+
 app.setErrorHandler((e, req, reply) => { req.log.error(e); reply.code(500).send({ error: 'internal_error' }); });
 app.listen({ port: Number(process.env.PORT || 3000), host: process.env.HOST || '0.0.0.0' }).catch(e => { app.log.error(e); process.exit(1); });
