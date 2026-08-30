@@ -82,5 +82,21 @@ app.get('/api/v1/dependencies', async () => { const [r]=await db.query('SELECT d
 app.post('/api/v1/dependencies', async req => { const p=Number(req.body?.parent_host_id), c=Number(req.body?.child_host_id); if(!p||!c||p===c)return {error:'valid_distinct_hosts_required'}; try { const [r]=await db.execute('INSERT INTO dependencies(parent_host_id,child_host_id,enabled) VALUES(?,?,1)',[p,c]); return {success:true,id:r.insertId}; } catch(e) { if(e.code==='ER_DUP_ENTRY')return {error:'dependency_exists'}; throw e; } });
 app.delete('/api/v1/dependencies/:id', async req => { await db.execute('DELETE FROM dependencies WHERE id=?',[req.params.id]); return {success:true}; });
 
+// Notification channel administration and delivery testing.
+app.get('/api/v1/notification-channels', async () => { const [r]=await db.query('SELECT id,name,type,enabled,config FROM notification_channels ORDER BY name'); return r.map(x=>({...x,config:parseJson(x.config)||{}})); });
+app.post('/api/v1/notification-channels', async req => { const b=req.body||{}; const type=String(b.type||'').toUpperCase(); if(!b.name||!['TELEGRAM','EMAIL','WEBHOOK'].includes(type))return {error:'valid_name_and_type_required'}; const [r]=await db.execute('INSERT INTO notification_channels(name,type,config,enabled) VALUES(?,?,?,?)',[String(b.name),type,JSON.stringify(b.config||{}),b.enabled===false?0:1]); return {success:true,id:r.insertId}; });
+app.put('/api/v1/notification-channels/:id', async req => { const b=req.body||{}; const type=String(b.type||'').toUpperCase(); if(!b.name||!['TELEGRAM','EMAIL','WEBHOOK'].includes(type))return {error:'valid_name_and_type_required'}; await db.execute('UPDATE notification_channels SET name=?,type=?,config=?,enabled=? WHERE id=?',[String(b.name),type,JSON.stringify(b.config||{}),b.enabled===false?0:1,req.params.id]); return {success:true}; });
+app.delete('/api/v1/notification-channels/:id', async req => { await db.execute('DELETE FROM notification_channels WHERE id=?',[req.params.id]); return {success:true}; });
+
+// Discovery helper: creates standard items idempotently from an Agent report.
+app.post('/api/v1/hosts/:id/discovery/apply', async req => {
+  const hostId=Number(req.params.id); const d=req.body||{}; const created=[];
+  const add=async(key,type,config,interval=60)=>{const [r]=await db.execute('INSERT IGNORE INTO monitor_items(host_id,item_key,item_type,enabled,interval_sec,config) VALUES(?,?,?,?,?,?)',[hostId,key,type,1,interval,JSON.stringify(config)]); if(r.affectedRows)created.push({id:r.insertId,item_key:key,item_type:type});};
+  for(const disk of d.disks||[]) if(disk.mount) await add(`disk.used[${disk.mount}]`,'metric',{});
+  for(const nic of d.network||[]) if(nic.name) await add(`net.io[${nic.name}]`,'metric',{});
+  for(const service of d.services||[]) if(service.name) await add(`service.state[${service.name}]`,'service',{service:service.name});
+  return {success:true,created};
+});
+
 app.setErrorHandler((e, req, reply) => { req.log.error(e); reply.code(500).send({ error: 'internal_error' }); });
 app.listen({ port: Number(process.env.PORT || 3000), host: process.env.HOST || '0.0.0.0' }).catch(e => { app.log.error(e); process.exit(1); });
