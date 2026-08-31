@@ -1,0 +1,77 @@
+name: E2E
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: monitoring
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install API dependencies
+        working-directory: api
+        run: npm install --ignore-scripts
+
+      - name: Initialize database
+        env:
+          MYSQL_PWD: root
+        run: |
+          mysql -h 127.0.0.1 -uroot monitoring < database/schema.sql
+          for f in database/migrations/*.sql; do
+            mysql -h 127.0.0.1 -uroot monitoring < "$f"
+          done
+          if [ -f database/seed.sql ]; then mysql -h 127.0.0.1 -uroot monitoring < database/seed.sql; fi
+
+      - name: Start API
+        working-directory: api
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: monitoring
+          PORT: 3000
+        run: |
+          node src/server.js > /tmp/monitoring-api.log 2>&1 &
+          echo $! > /tmp/monitoring-api.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health >/tmp/health.json 2>/dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:3000/health
+
+      - name: API smoke checks
+        run: |
+          curl -fsS http://127.0.0.1:3000/health
+          curl -fsS http://127.0.0.1:3000/api/v1/health || true
+
+      - name: Agent syntax smoke check
+        run: node --check agent/src/index.js
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-api-log
+          path: /tmp/monitoring-api.log
